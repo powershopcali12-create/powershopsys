@@ -1,4 +1,4 @@
-import React, { useState, useEffect, createContext, useContext } from 'react';
+React, { useState, useEffect, createContext, useContext } from 'react';
 import { supabase } from './lib/supabase';
 
 // ==========================================
@@ -14,6 +14,7 @@ export function AppProvider({ children }) {
   const [ordenes, setOrdenes] = useState([]);
   const [facturas, setFacturas] = useState([]);
   const [compras, setCompras] = useState([]);
+  const [cotizaciones, setCotizaciones] = useState([]);
   const [usuarioSesion, setUsuarioSesion] = useState(() => {
     const saved = localStorage.getItem('techfix_sesion');
     return saved ? JSON.parse(saved) : null;
@@ -54,6 +55,9 @@ export function AppProvider({ children }) {
 
       const resComp = await supabase.from('compras').select('*').order('id', { ascending: false });
       if (resComp.data) setCompras(resComp.data);
+
+      const resCot = await supabase.from('cotizaciones').select('*').order('id', { ascending: false });
+      if (resCot.data) setCotizaciones(resCot.data);
 
     } catch (error) {
       console.error("Error conectando a Supabase:", error);
@@ -116,8 +120,7 @@ export function AppProvider({ children }) {
       serie: ordenData.serie || '',
       fallo_reportado: ordenData.fallo_reportado,
       deja_cargador: ordenData.deja_cargador || false,
-      deja_bateria: ordenData.deja_bateria || false,
-      serie_bateria: ordenData.serie_bateria || '',
+      serie_cargador: ordenData.serie_cargador || '',
       repuesto_compra_id: ordenData.repuesto_compra_id ? Number(ordenData.repuesto_compra_id) : null,
       valor_estimado: Number(ordenData.valor_estimado) || 0,
       total_pagar: 0,
@@ -313,6 +316,51 @@ export function AppProvider({ children }) {
     }
   };
 
+  const cancelarRemision = async (factura, motivo, nombreUsuario) => {
+    if (!factura?.id) {
+      alert('No se encontró el registro de la remisión.');
+      return false;
+    }
+    if (facturaEstaCancelada(factura)) {
+      alert('Esta remisión ya está cancelada.');
+      return false;
+    }
+    const motivoFinal = String(motivo || '').trim();
+    if (!motivoFinal) {
+      alert('Escribe el motivo de la cancelación.');
+      return false;
+    }
+
+    const registroCancelacion = {
+      _tipo: 'cancelacion',
+      cancelada: true,
+      motivo: motivoFinal,
+      usuario: nombreUsuario || 'Usuario',
+      fecha: new Date().toISOString(),
+      numero_factura: factura.numero_factura || ''
+    };
+    const itemsActualizados = [
+      ...(Array.isArray(factura.items) ? factura.items.filter(item => !item || item._tipo !== 'cancelacion') : []),
+      registroCancelacion
+    ];
+
+    const { data: actualizado, error } = await supabase
+      .from('facturas')
+      .update({ items: itemsActualizados })
+      .eq('id', factura.id)
+      .select()
+      .single();
+
+    if (error || !actualizado) {
+      console.error('Error cancelando remisión:', error);
+      alert(`No se pudo cancelar la remisión. ${error?.message || 'Intenta nuevamente.'}`);
+      return false;
+    }
+
+    setFacturas(prev => prev.map(item => item.id === factura.id ? actualizado : item));
+    return actualizado;
+  };
+
   const agregarRol = async (nombreRol, permisosObj) => {
     const { data: insertado, error } = await supabase.from('roles').insert([{ nombre: nombreRol, permisos: permisosObj }]).select();
     if (!error && insertado) setRoles(prev => [...prev, insertado[0]]);
@@ -359,8 +407,8 @@ export function AppProvider({ children }) {
       usuarioSesion, login, logout, rolActual,
       clientes, agregarCliente, modificarCliente,
       ordenes, agregarOrden, actualizarOrden,
-      facturas, remisionarOrden, agregarVentaDirecta,
-      compras, agregarCompra, actualizarPrecioCompra
+      facturas, remisionarOrden, agregarVentaDirecta, cancelarRemision,
+      compras, agregarCompra, actualizarPrecioCompra, cotizaciones, setCotizaciones
     }}>
       {children}
     </AppContext.Provider>
@@ -386,6 +434,13 @@ const obtenerGarantiaFactura = (factura) => {
 };
 
 const esRegistroGarantia = (item) => !!item && item._tipo === 'garantia';
+
+// La cancelación se conserva dentro del JSON existente de items para no exigir
+// nuevas columnas en la tabla facturas.
+const obtenerCancelacionFactura = (factura) =>
+  (Array.isArray(factura?.items) ? factura.items : []).find(item => item && item._tipo === 'cancelacion') || null;
+
+const facturaEstaCancelada = (factura) => !!obtenerCancelacionFactura(factura);
 
 // Normaliza teléfonos para enlaces de WhatsApp (wa.me).
 // Los números colombianos de 10 dígitos reciben el indicativo 57.
@@ -466,7 +521,7 @@ function MainApp() {
     empresa, clientes, ordenes, facturas, compras, agregarCompra, actualizarPrecioCompra, roles, agregarRol, actualizarRol, usuarios, agregarUsuario,
     usuarioSesion, logout, rolActual,
     agregarCliente, modificarCliente, agregarOrden, actualizarOrden,
-    remisionarOrden, agregarVentaDirecta, setEmpresa
+    remisionarOrden, agregarVentaDirecta, cancelarRemision, setEmpresa, cotizaciones, setCotizaciones
   } = useApp();
 
   const [tab, setTab] = useState('ordenes');
@@ -478,6 +533,7 @@ function MainApp() {
   const [modalRemisionarOrden, setModalRemisionarOrden] = useState(null);
   const [modalReporteExcel, setModalReporteExcel] = useState(false);
   const [facturaSeleccionada, setFacturaSeleccionada] = useState(null);
+  const [modalCancelarRemision, setModalCancelarRemision] = useState(null);
   const [documentoImprimir, setDocumentoImprimir] = useState(null);
   
   const [ocultarUtilidad, setOcultarUtilidad] = useState(() => {
@@ -519,8 +575,7 @@ function MainApp() {
     fallo_reportado: '', 
     valor_estimado: 0,
     deja_cargador: false,
-    deja_bateria: false,
-    serie_bateria: '',
+    serie_cargador: '',
     repuesto_compra_id: ''
   });
 
@@ -531,6 +586,15 @@ function MainApp() {
   const [clienteVentaSeleccionado, setClienteVentaSeleccionado] = useState(null);
   const [formNuevoClienteVenta, setFormNuevoClienteVenta] = useState({ nombre: '', telefono: '', cedula: '', email: '', direccion: '' });
   const [itemsVenta, setItemsVenta] = useState([{ descripcion: '', cantidad: 1, precio: 0 }]);
+  const [tipoClienteCot, setTipoClienteCot] = useState('EXISTENTE');
+  const [busquedaClienteCot, setBusquedaClienteCot] = useState('');
+  const [clienteCotSeleccionado, setClienteCotSeleccionado] = useState(null);
+  const [formNuevoClienteCot, setFormNuevoClienteCot] = useState({ nombre: '', telefono: '', cedula: '', email: '', direccion: '' });
+  const [tipoCotizacion, setTipoCotizacion] = useState('INDIVIDUAL');
+  const [opcionesCotizacion, setOpcionesCotizacion] = useState([[{ descripcion: '', cantidad: 1, precio: 0 }]]);
+  const [cotizacionesBusqueda, setCotizacionesBusqueda] = useState('');
+  const [cotizacionActiva, setCotizacionActiva] = useState(null);
+  const [guardandoCotizacion, setGuardandoCotizacion] = useState(false);
   const [compraSeleccionadaVentaId, setCompraSeleccionadaVentaId] = useState('');
   const [garantiaVentaAplica, setGarantiaVentaAplica] = useState(false);
   const [garantiaVentaTiempo, setGarantiaVentaTiempo] = useState('');
@@ -541,7 +605,7 @@ function MainApp() {
   const [comprasBusqueda, setComprasBusqueda] = useState('');
   const [mostrarHistorialPortal, setMostrarHistorialPortal] = useState(false);
 
-  const [formNuevoRol, setFormNuevoRol] = useState({ nombre: '', permisos: { crear_orden: true, editar_diagnostico: true, ver_clientes: true, editar_clientes: true, facturar: true, ver_configuracion: true } });
+  const [formNuevoRol, setFormNuevoRol] = useState({ nombre: '', permisos: { crear_orden: true, editar_diagnostico: true, ver_clientes: true, editar_clientes: true, facturar: true, cancelar_remision: false, ver_configuracion: true } });
   const [formUsuarioNuevo, setFormUsuarioNuevo] = useState({ nombre: '', usuario: '', clave: '', rolId: roles[0]?.id || '' });
 
   const normalizarBusqueda = (valor) => String(valor ?? '')
@@ -550,6 +614,11 @@ function MainApp() {
     .toLowerCase()
     .trim();
 
+  const obtenerIdRegistroOrden = (orden) => {
+    const indiceOriginal = ordenes.findIndex(registro => registro.id === orden?.id);
+    return `#${1001 + (ordenes.length - 1 - Math.max(indiceOriginal, 0))}`;
+  };
+
   const ordenesFiltradas = [...ordenes].filter(o => {
     const fechaRegistro = String(o.created_at || o.fecha || '').slice(0, 10);
     if (ordenesFiltroInicio && fechaRegistro && fechaRegistro < ordenesFiltroInicio) return false;
@@ -557,9 +626,13 @@ function MainApp() {
     const termino = normalizarBusqueda(ordenesBusqueda);
     if (!termino) return true;
     const cliente = clientes.find(c => normalizarBusqueda(c.nombre) === normalizarBusqueda(o.cliente_nombre));
+    const idRegistroConsecutivo = obtenerIdRegistroOrden(o);
+    const busquedaId = termino.replace(/^#/, '');
     return normalizarBusqueda(o.cliente_nombre).includes(termino) ||
       normalizarBusqueda(o.cliente_telefono).includes(termino) ||
-      normalizarBusqueda(cliente?.cedula).includes(termino);
+      normalizarBusqueda(cliente?.cedula).includes(termino) ||
+      normalizarBusqueda(idRegistroConsecutivo).includes(termino) ||
+      (busquedaId !== '' && String(idRegistroConsecutivo).replace(/^#/, '').includes(busquedaId));
   }).sort((a, b) => {
     const fechaA = new Date(a.created_at || a.fecha || 0).getTime() || 0;
     const fechaB = new Date(b.created_at || b.fecha || 0).getTime() || 0;
@@ -611,6 +684,7 @@ function MainApp() {
     const { fechaInicio, fechaFin, tipo } = reporteFiltro;
 
     const filtradas = facturas.filter(f => {
+      if (facturaEstaCancelada(f)) return false;
       const fechaF = f.fecha; 
       const cumpleFecha = fechaF >= fechaInicio && fechaF <= fechaFin;
       if (!cumpleFecha) return false;
@@ -669,18 +743,20 @@ function MainApp() {
   const permisosRol = rolActual ? (typeof rolActual.permisos === 'string' ? JSON.parse(rolActual.permisos) : rolActual.permisos) : {};
   
   const permisos = usuarioSesion?.id === 'emergencia' || (rolActual && rolActual.nombre?.toLowerCase().includes('admin'))
-    ? { crear_orden: true, editar_diagnostico: true, ver_clientes: true, editar_clientes: true, facturar: true, ver_configuracion: true }
+    ? { crear_orden: true, editar_diagnostico: true, ver_clientes: true, editar_clientes: true, facturar: true, cancelar_remision: usuarioSesion?.id === 'emergencia' ? true : (permisosRol.cancelar_remision ?? false), ver_configuracion: true }
     : {
         crear_orden: permisosRol.crear_orden ?? true,
         editar_diagnostico: permisosRol.editar_diagnostico ?? true,
         ver_clientes: permisosRol.ver_clientes ?? true,
         editar_clientes: permisosRol.editar_clientes ?? true,
         facturar: permisosRol.facturar ?? true,
+        cancelar_remision: permisosRol.cancelar_remision ?? false,
         ver_configuracion: permisosRol.ver_configuracion ?? true,
     };
 
   return (
     <div className="flex min-h-screen bg-slate-950 text-slate-100 font-sans">
+      <style>{`@media print { main.no-imprimir { display: block !important; } body * { visibility: hidden !important; } #documento-cotizacion, #documento-cotizacion * { visibility: visible !important; } #documento-cotizacion { position: absolute; left: 0; top: 0; width: 100%; background: white !important; color: #111827 !important; } .no-imprimir { display: none !important; } }`}</style>
       
       {/* BARRA LATERAL */}
       <aside className="w-64 bg-slate-900 border-r border-slate-800 p-5 space-y-6 flex flex-col justify-between shrink-0 no-imprimir">
@@ -703,6 +779,7 @@ function MainApp() {
             {permisos.ver_clientes && <button onClick={() => setTab('clientes')} className={`w-full text-left p-3 rounded-xl transition ${tab === 'clientes' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800'}`}>👥 Directorio de Clientes</button>}
             {permisos.facturar && <button onClick={() => setTab('facturacion')} className={`w-full text-left p-3 rounded-xl transition ${tab === 'facturacion' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800'}`}>🧾 Remisiones y Ventas</button>}
             {permisos.facturar && <button onClick={() => setTab('compras')} className={`w-full text-left p-3 rounded-xl transition ${tab === 'compras' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800'}`}>🛒 Compras y Gastos</button>}
+            <button onClick={() => { setTab('cotizador'); setCotizacionActiva(null); }} className={`w-full text-left p-3 rounded-xl transition ${tab === 'cotizador' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800'}`}>📝 Cotizador</button>
             <button onClick={() => setTab('portal')} className={`w-full text-left p-3 rounded-xl transition ${tab === 'portal' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800'}`}>🔍 Portal Consulta Cliente</button>
             {permisos.ver_configuracion && <button onClick={() => setTab('config')} className={`w-full text-left p-3 rounded-xl transition ${tab === 'config' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800'}`}>⚙️ Configuración & Permisos</button>}
           </nav>
@@ -788,23 +865,16 @@ function MainApp() {
                     />
                     🔌 ¿Deja Cargador?
                   </label>
-                  <label className="flex items-center gap-2 cursor-pointer font-bold">
-                    <input 
-                      type="checkbox" 
-                      className="w-4 h-4 accent-indigo-600 rounded" 
-                      checked={formOrden.deja_bateria} 
-                      onChange={e => setFormOrden({ ...formOrden, deja_bateria: e.target.checked })} 
-                    />
-                    🔋 ¿Deja Batería?
-                  </label>
+
                 </div>
-                {formOrden.deja_bateria && (
+                {formOrden.deja_cargador && (
                   <div>
+                    <label className="block text-xs text-slate-300 mb-1">Número de serie del cargador</label>
                     <input 
-                      placeholder="N° de Serie (S/N) de la Batería" 
+                      placeholder="N° de serie (S/N) del cargador" 
                       className="w-full bg-slate-800 border border-slate-700 p-2 rounded-xl text-xs text-white" 
-                      value={formOrden.serie_bateria} 
-                      onChange={e => setFormOrden({ ...formOrden, serie_bateria: e.target.value })} 
+                      value={formOrden.serie_cargador} 
+                      onChange={e => setFormOrden({ ...formOrden, serie_cargador: e.target.value })} 
                     />
                   </div>
                 )}
@@ -847,7 +917,7 @@ function MainApp() {
                   setTab('ordenes');
                   setClienteSeleccionado(null);
                   setFormNuevoCliente({ nombre: '', telefono: '', cedula: '', email: '', direccion: '' });
-                  setFormOrden({ tipo_equipo: 'PORTATIL', marca_modelo: '', serie: '', fallo_reportado: '', valor_estimado: 0, deja_cargador: false, deja_bateria: false, serie_bateria: '', repuesto_compra_id: '' });
+                  setFormOrden({ tipo_equipo: 'PORTATIL', marca_modelo: '', serie: '', fallo_reportado: '', valor_estimado: 0, deja_cargador: false, serie_cargador: '', repuesto_compra_id: '' });
                 }
               }}
               className="w-full bg-indigo-600 hover:bg-indigo-500 font-bold py-3 rounded-xl text-xs transition shadow-lg shadow-indigo-600/30 text-white"
@@ -863,8 +933,8 @@ function MainApp() {
             <h2 className="text-xl font-bold text-white">Seguimiento de Reparaciones</h2>
             <div className="bg-slate-800/60 p-4 rounded-xl border border-slate-700/80 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 items-end text-xs">
               <div className="lg:col-span-2">
-                <label className="text-slate-400 block mb-1 font-semibold">🔍 Buscar nombre, cédula o celular</label>
-                <input value={ordenesBusqueda} onChange={e => setOrdenesBusqueda(e.target.value)} placeholder="Nombre, cédula o celular..." className="w-full bg-slate-800 border border-slate-700 p-2 rounded-xl text-white" />
+                <label className="text-slate-400 block mb-1 font-semibold">🔍 Buscar ID de registro, nombre, cédula o celular</label>
+                <input value={ordenesBusqueda} onChange={e => setOrdenesBusqueda(e.target.value)} placeholder="ID (ej. 1001), nombre, cédula o celular..." className="w-full bg-slate-800 border border-slate-700 p-2 rounded-xl text-white" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1 font-semibold">Desde</label>
@@ -893,8 +963,7 @@ function MainApp() {
                 </thead>
                 <tbody className="divide-y divide-slate-800">
                   {ordenesFiltradas.map((o) => {
-                    const indiceOriginal = ordenes.findIndex(registro => registro.id === o.id);
-                    const idRegistroConsecutivo = `#${1001 + (ordenes.length - 1 - Math.max(indiceOriginal, 0))}`;
+                    const idRegistroConsecutivo = obtenerIdRegistroOrden(o);
                     return (
                       <tr key={o.id} className="hover:bg-slate-800/40">
                         <td className="p-3 font-bold text-indigo-400">{idRegistroConsecutivo}</td>
@@ -908,8 +977,7 @@ function MainApp() {
                           <p className="font-bold text-white">{o.tipo_equipo} {o.marca_modelo}</p>
                           <p className="text-[10px] text-slate-400">S/N: {o.serie || 'N/A'}</p>
                           <div className="flex gap-2 mt-1 text-[10px]">
-                            {o.deja_cargador && <span className="bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800">🔌 Cargador</span>}
-                            {o.deja_bateria && <span className="bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800">🔋 Batería {o.serie_bateria ? `(${o.serie_bateria})` : ''}</span>}
+                            {o.deja_cargador && <span className="bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800">🔌 Cargador {o.serie_cargador ? `(${o.serie_cargador})` : '(S/N no registrado)'}</span>}
                           </div>
                         </td>
                         <td className="p-3"><span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-semibold">{o.estado}</span></td>
@@ -926,7 +994,7 @@ function MainApp() {
                           {permisos.editar_diagnostico && <button onClick={() => { setModalEditOrden(o); setEditOrdForm({ estado: o.estado, observacion: '', diagnostico: o.diagnostico || '', presupuesto: o.valor_estimado || 0, totalPagar: o.total_pagar || 0, repuestoCompraId: o.repuesto_compra_id || '', garantiaAplica: obtenerGarantiaOrden(o).aplica, garantiaTiempo: obtenerGarantiaOrden(o).tiempo }); }} className="bg-indigo-600 text-white px-2 py-1 rounded text-[11px]">✏️ Diagnóstico</button>}
                           <button onClick={() => enviarWhatsApp(o, idRegistroConsecutivo)} className="bg-emerald-600 text-white px-2 py-1 rounded text-[11px]">💬 WhatsApp</button>
                           <button onClick={() => setDocumentoImprimir({ tipo: 'ORDEN', data: o, idConsecutivo: idRegistroConsecutivo })} className="bg-slate-800 text-white px-2 py-1 rounded text-[11px]">🖨️ PDF</button>
-                          {o.estado === 'Reparado / Listo' && permisos.facturar && <button onClick={() => setModalRemisionarOrden({ orden: o, compraId: o.repuesto_compra_id || '', garantiaAplica: obtenerGarantiaOrden(o).aplica, garantiaTiempo: obtenerGarantiaOrden(o).tiempo })} className="bg-emerald-500 text-white px-2 py-1 rounded text-[11px] font-bold">📄 Remisionar</button>}
+                          {(o.estado === 'Reparado / Listo' || o.estado === 'No tiene reparación') && permisos.facturar && <button onClick={() => setModalRemisionarOrden({ orden: o, compraId: o.repuesto_compra_id || '', garantiaAplica: obtenerGarantiaOrden(o).aplica, garantiaTiempo: obtenerGarantiaOrden(o).tiempo })} className="bg-emerald-500 text-white px-2 py-1 rounded text-[11px] font-bold">📄 Remisionar</button>}
                         </td>
                       </tr>
                     );
@@ -1120,21 +1188,27 @@ function MainApp() {
 
                       return (
                         <tr key={f.id} className="hover:bg-slate-800/40">
-                          <td className="p-3 font-bold text-indigo-400">{f.numero_factura}</td>
+                          <td className={`p-3 font-bold ${facturaEstaCancelada(f) ? 'text-rose-400 line-through' : 'text-indigo-400'}`}>
+                            {f.numero_factura}
+                            {facturaEstaCancelada(f) && <span className="block no-underline text-[10px] font-black text-rose-400 mt-1">CANCELADA</span>}
+                          </td>
                           <td className="p-3 text-slate-400">{f.fecha}</td>
                           <td className="p-3 font-medium text-white">
                             {f.cliente_nombre}
                             <span className="block text-[10px] text-indigo-300 font-semibold mt-0.5">👤 Vendedor: {f.usuario_creador || 'Sistema'}</span>
                           </td>
-                          <td className="p-3 font-extrabold text-white">$ {totalVenta.toLocaleString('es-CO')}</td>
+                          <td className={`p-3 font-extrabold ${facturaEstaCancelada(f) ? 'text-rose-300 line-through' : 'text-white'}`}>$ {totalVenta.toLocaleString('es-CO')}</td>
                           
                           {!ocultarUtilidad && (
-                            <td className="p-3 font-extrabold text-emerald-400">$ {utilidad.toLocaleString('es-CO')}</td>
+                            <td className={`p-3 font-extrabold ${facturaEstaCancelada(f) ? 'text-slate-500 line-through' : 'text-emerald-400'}`}>$ {utilidad.toLocaleString('es-CO')}</td>
                           )}
 
                           <td className="p-3 text-right space-x-1">
                             <button onClick={() => setFacturaSeleccionada(f)} className="bg-indigo-600 text-white px-2 py-1 rounded text-[11px]">👁️ Ver</button>
                             <button onClick={() => setDocumentoImprimir({ tipo: 'FACTURA', data: f })} className="bg-slate-800 text-white px-2 py-1 rounded text-[11px]">🖨️ PDF</button>
+                            {permisos.cancelar_remision && !facturaEstaCancelada(f) && (
+                              <button onClick={() => setModalCancelarRemision({ factura: f, motivo: '' })} className="bg-rose-700 hover:bg-rose-600 text-white px-2 py-1 rounded text-[11px]">⛔ Cancelar</button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -1147,6 +1221,46 @@ function MainApp() {
         )}
 
         {/* 5. COMPRAS Y GASTOS */}
+        {tab === 'cotizador' && (
+          <div className="space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div><h2 className="text-2xl font-black text-white">Cotizador</h2><p className="text-xs text-slate-400 mt-1">Cotizaciones individuales o con varias alternativas para el mismo cliente.</p></div>
+              <button onClick={() => { setCotizacionActiva(null); setClienteCotSeleccionado(null); setTipoClienteCot('EXISTENTE'); setTipoCotizacion('INDIVIDUAL'); setOpcionesCotizacion([[{ descripcion: '', cantidad: 1, precio: 0 }]]); setFormNuevoClienteCot({ nombre: '', telefono: '', cedula: '', email: '', direccion: '' }); }} className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2.5 rounded-xl text-xs font-bold">+ Nueva cotización</button>
+            </div>
+            {!cotizacionActiva ? (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-5">
+                <div className="flex flex-wrap gap-3 items-center">
+                  <input value={cotizacionesBusqueda} onChange={e => setCotizacionesBusqueda(e.target.value)} placeholder="Buscar por número, nombre o teléfono..." className="flex-1 min-w-64 bg-slate-800 border border-slate-700 p-3 rounded-xl text-xs" />
+                  <div className="flex gap-2"><button onClick={() => setTipoCotizacion('INDIVIDUAL')} className={`px-3 py-2 rounded-lg text-xs font-bold ${tipoCotizacion === 'INDIVIDUAL' ? 'bg-indigo-600' : 'bg-slate-800'}`}>Individual</button><button onClick={() => setTipoCotizacion('MULTIPLE')} className={`px-3 py-2 rounded-lg text-xs font-bold ${tipoCotizacion === 'MULTIPLE' ? 'bg-indigo-600' : 'bg-slate-800'}`}>Múltiple</button></div>
+                </div>
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div className="space-y-3">
+                    <h3 className="font-bold text-indigo-300 text-sm">Cliente</h3>
+                    <div className="flex gap-2"><button onClick={() => {setTipoClienteCot('EXISTENTE');setClienteCotSeleccionado(null);}} className={`flex-1 p-2 rounded-lg text-xs font-bold ${tipoClienteCot==='EXISTENTE'?'bg-indigo-600':'bg-slate-800'}`}>Cliente existente</button><button onClick={() => {setTipoClienteCot('NUEVO');setClienteCotSeleccionado(null);}} className={`flex-1 p-2 rounded-lg text-xs font-bold ${tipoClienteCot==='NUEVO'?'bg-indigo-600':'bg-slate-800'}`}>+ Nuevo cliente</button></div>
+                    {tipoClienteCot === 'EXISTENTE' ? <>
+                      {!clienteCotSeleccionado ? <><input value={busquedaClienteCot} onChange={e=>setBusquedaClienteCot(e.target.value)} placeholder="Buscar cliente por nombre, cédula o teléfono" className="w-full bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/><div className="max-h-40 overflow-auto border border-slate-800 rounded-lg">{clientes.filter(c=>normalizarBusqueda(`${c.nombre} ${c.telefono} ${c.cedula}`).includes(normalizarBusqueda(busquedaClienteCot))).slice(0,30).map(c=><button key={c.id} onClick={()=>{setClienteCotSeleccionado(c);setBusquedaClienteCot('');}} className="block w-full text-left p-2.5 text-xs hover:bg-slate-800 border-b border-slate-800">{c.nombre} · {c.telefono || 'Sin teléfono'} {c.cedula ? `· CC ${c.cedula}` : ''}</button>)}</div></> : <div className="bg-slate-800 p-3 rounded-xl text-xs flex justify-between gap-2"><div><b>{clienteCotSeleccionado.nombre}</b><p className="text-slate-400">{clienteCotSeleccionado.telefono}</p></div><button onClick={()=>setClienteCotSeleccionado(null)} className="text-indigo-300">Cambiar</button></div>}
+                    </> : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2"><input value={formNuevoClienteCot.nombre} onChange={e=>setFormNuevoClienteCot({...formNuevoClienteCot,nombre:e.target.value})} placeholder="Nombre completo *" className="bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/><input value={formNuevoClienteCot.telefono} onChange={e=>setFormNuevoClienteCot({...formNuevoClienteCot,telefono:e.target.value})} placeholder="Teléfono / WhatsApp *" className="bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/><input value={formNuevoClienteCot.cedula} onChange={e=>setFormNuevoClienteCot({...formNuevoClienteCot,cedula:e.target.value})} placeholder="Cédula" className="bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/><input value={formNuevoClienteCot.email} onChange={e=>setFormNuevoClienteCot({...formNuevoClienteCot,email:e.target.value})} placeholder="Correo" className="bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/><input value={formNuevoClienteCot.direccion} onChange={e=>setFormNuevoClienteCot({...formNuevoClienteCot,direccion:e.target.value})} placeholder="Dirección" className="sm:col-span-2 bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/></div>}
+                  </div>
+                  <div className="space-y-2"><h3 className="font-bold text-indigo-300 text-sm">Datos de cotización</h3><p className="text-xs text-slate-400">Número consecutivo independiente: lo genera el sistema al guardar. Cada opción puede contener varios productos o servicios y sus cantidades y precios.</p><label className="block text-xs text-slate-400">Vigencia (opcional)</label><input id="vigenciaCotizacion" type="date" className="bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/></div>
+                </div>
+                <div className="space-y-4">
+                  {(tipoCotizacion==='INDIVIDUAL' ? opcionesCotizacion.slice(0,1) : opcionesCotizacion).map((items,oi)=><div key={oi} className="border border-slate-700 rounded-xl p-4 space-y-3"><div className="flex items-center justify-between"><h3 className="font-bold text-white">{tipoCotizacion==='MULTIPLE'?`Opción ${oi+1}`:'Detalle de cotización'}</h3><button onClick={()=>setOpcionesCotizacion(prev=>prev.map((op,i)=>i===oi? [...op,{descripcion:'',cantidad:1,precio:0}]:op))} className="text-indigo-300 text-xs font-bold">+ Agregar producto/servicio</button></div>{items.map((it,ii)=><div key={ii} className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center"><input value={it.descripcion} onChange={e=>setOpcionesCotizacion(prev=>prev.map((op,i)=>i===oi?op.map((x,j)=>j===ii?{...x,descripcion:e.target.value}:x):op))} placeholder="Descripción del producto o servicio *" className="sm:col-span-6 bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/><input type="number" min="1" value={it.cantidad} onChange={e=>setOpcionesCotizacion(prev=>prev.map((op,i)=>i===oi?op.map((x,j)=>j===ii?{...x,cantidad:Math.max(1,Number(e.target.value)||1)}:x):op))} placeholder="Cant." className="sm:col-span-2 bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/><input type="number" min="0" value={it.precio} onChange={e=>setOpcionesCotizacion(prev=>prev.map((op,i)=>i===oi?op.map((x,j)=>j===ii?{...x,precio:Math.max(0,Number(e.target.value)||0)}:x):op))} placeholder="Precio unitario" className="sm:col-span-3 bg-slate-800 border border-slate-700 p-2.5 rounded-lg text-xs"/><button onClick={()=>setOpcionesCotizacion(prev=>prev.map((op,i)=>i===oi?op.filter((_,j)=>j!==ii).length?op.filter((_,j)=>j!==ii):[{descripcion:'',cantidad:1,precio:0}]:op))} className="sm:col-span-1 text-rose-400 text-xs">✕</button><div className="sm:col-span-12 text-right text-xs text-slate-400">Subtotal: $ {(Number(it.cantidad||0)*Number(it.precio||0)).toLocaleString('es-CO')}</div></div>)}<div className="text-right text-emerald-300 font-black">Total opción: $ {items.reduce((sum,it)=>sum+Number(it.cantidad||0)*Number(it.precio||0),0).toLocaleString('es-CO')}</div></div>)}
+                  {tipoCotizacion==='MULTIPLE' && <button onClick={()=>setOpcionesCotizacion(prev=>[...prev,[{descripcion:'',cantidad:1,precio:0}]])} className="border border-dashed border-indigo-500 text-indigo-300 rounded-xl p-3 w-full text-xs font-bold">+ Agregar otra opción a esta cotización</button>}
+                </div>
+                <div className="flex justify-end"><button disabled={guardandoCotizacion} onClick={async()=>{let cli=clienteCotSeleccionado;if(tipoClienteCot==='NUEVO'){if(!formNuevoClienteCot.nombre.trim()||!formNuevoClienteCot.telefono.trim()){alert('Ingresa nombre y teléfono del nuevo cliente.');return;}cli=await agregarCliente({nombre:formNuevoClienteCot.nombre.trim(),telefono:formNuevoClienteCot.telefono.trim(),cedula:formNuevoClienteCot.cedula.trim(),email:formNuevoClienteCot.email.trim(),direccion:formNuevoClienteCot.direccion.trim()});if(!cli)return;}if(!cli){alert('Selecciona un cliente o registra uno nuevo.');return;}const ops=(tipoCotizacion==='INDIVIDUAL' ? opcionesCotizacion.slice(0,1) : opcionesCotizacion).map((items,i)=>({nombre:`Opción ${i+1}`,items:items.filter(x=>x.descripcion.trim()).map(x=>({...x,cantidad:Number(x.cantidad)||1,precio:Number(x.precio)||0,subtotal:(Number(x.cantidad)||1)*(Number(x.precio)||0)})),total:items.filter(x=>x.descripcion.trim()).reduce((sum,x)=>sum+(Number(x.cantidad)||1)*(Number(x.precio)||0),0)}));if(ops.some(o=>!o.items.length)){alert('Cada opción debe tener al menos un producto o servicio con descripción.');return;}setGuardandoCotizacion(true);try{const maxNum=cotizaciones.reduce((m,c)=>Math.max(m,Number(String(c.numero_cotizacion||'').replace(/\D/g,''))||0),0);const numero=`COT-${String(maxNum+1).padStart(5,'0')}`;const nueva={numero_cotizacion:numero,cliente_id:cli.id,cliente_nombre:cli.nombre,cliente_telefono:cli.telefono,cliente_cedula:cli.cedula||'',cliente_email:cli.email||'',cliente_direccion:cli.direccion||'',tipo:tipoCotizacion,opciones:ops,vigencia:document.getElementById('vigenciaCotizacion')?.value||null,usuario_creador:usuarioSesion?.nombre||'Sistema',fecha:new Date().toISOString()};const {data,error}=await supabase.from('cotizaciones').insert([nueva]).select();if(error)throw error;setCotizaciones(prev=>[data[0],...prev]);setCotizacionActiva(data[0]);alert(`Cotización ${numero} guardada correctamente.`);}catch(err){console.error(err);alert('No se pudo guardar la cotización. Verifica que hayas creado la tabla cotizaciones en Supabase y sus permisos.');}finally{setGuardandoCotizacion(false);}}} className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-5 py-3 rounded-xl text-xs font-black">{guardandoCotizacion?'Guardando...':'Guardar cotización'}</button></div>
+              </div>
+            ) : (
+              <div className="bg-white text-slate-900 rounded-2xl p-8 max-w-4xl mx-auto space-y-5" id="documento-cotizacion">
+                <div className="flex justify-between gap-4 border-b pb-4"><div>{empresa.logoUrl&&<img src={empresa.logoUrl} alt="Logo" className="w-20 h-20 object-contain"/>}<h2 className="text-2xl font-black">{empresa.nombre}</h2><p>{empresa.direccion} · {empresa.telefono}</p></div><div className="text-right"><h3 className="text-xl font-black">COTIZACIÓN</h3><p className="font-bold">{cotizacionActiva.numero_cotizacion}</p><p>{String(cotizacionActiva.fecha||'').slice(0,10)}</p><p>{cotizacionActiva.tipo==='MULTIPLE'?'Cotización múltiple':'Cotización individual'}</p></div></div>
+                <div><p><b>Cliente:</b> {cotizacionActiva.cliente_nombre}</p><p><b>Teléfono:</b> {cotizacionActiva.cliente_telefono}</p>{cotizacionActiva.cliente_cedula&&<p><b>Cédula:</b> {cotizacionActiva.cliente_cedula}</p>}{cotizacionActiva.vigencia&&<p><b>Vigente hasta:</b> {cotizacionActiva.vigencia}</p>}</div>
+                {(cotizacionActiva.opciones||[]).map((op,i)=><div key={i} className="border rounded-lg p-4"><h3 className="font-black text-lg mb-2">{cotizacionActiva.tipo==='MULTIPLE'?op.nombre:'Detalle de cotización'}</h3><table className="w-full text-sm border-collapse"><thead><tr className="bg-slate-100"><th className="text-left p-2 border">Descripción</th><th className="p-2 border">Cant.</th><th className="text-right p-2 border">Valor unitario</th><th className="text-right p-2 border">Subtotal</th></tr></thead><tbody>{(op.items||[]).map((it,j)=><tr key={j}><td className="p-2 border">{it.descripcion}</td><td className="p-2 border text-center">{it.cantidad}</td><td className="p-2 border text-right">$ {Number(it.precio).toLocaleString('es-CO')}</td><td className="p-2 border text-right">$ {Number(it.subtotal).toLocaleString('es-CO')}</td></tr>)}</tbody></table><p className="text-right font-black text-lg mt-3">Total: $ {Number(op.total||0).toLocaleString('es-CO')}</p></div>)}
+                <div className="flex flex-wrap justify-end gap-2 no-imprimir"><button onClick={()=>setCotizacionActiva(null)} className="bg-slate-200 px-3 py-2 rounded-lg text-xs font-bold">Volver al historial</button><button onClick={()=>window.print()} className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-xs font-bold">Imprimir / Guardar PDF</button><button onClick={()=>{const tel=normalizarTelefonoWhatsApp(cotizacionActiva.cliente_telefono);if(!tel){alert('El cliente no tiene teléfono válido para WhatsApp.');return;}const resumen=(cotizacionActiva.opciones||[]).map((op,i)=>`${cotizacionActiva.tipo==='MULTIPLE'?op.nombre:'Total'}: $ ${Number(op.total||0).toLocaleString('es-CO')}`).join('\n');const msg=`Hola ${cotizacionActiva.cliente_nombre}, te compartimos la cotización ${cotizacionActiva.numero_cotizacion} de ${empresa.nombre}.\n${resumen}\nPuedes solicitar el documento completo por este medio.`;window.open(`https://wa.me/${tel}?text=${encodeURIComponent(msg)}`,'_blank','noopener,noreferrer');}} className="bg-emerald-600 text-white px-4 py-2 rounded-lg text-xs font-bold">Enviar por WhatsApp</button></div>
+              </div>
+            )}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5"><h3 className="font-bold mb-3">Historial de cotizaciones</h3><div className="space-y-2">{cotizaciones.filter(c=>normalizarBusqueda(`${c.numero_cotizacion} ${c.cliente_nombre} ${c.cliente_telefono}`).includes(normalizarBusqueda(cotizacionesBusqueda))).map(c=><div key={c.id} className="flex flex-wrap items-center justify-between gap-3 border border-slate-800 rounded-xl p-3"><div><p className="font-bold text-sm">{c.numero_cotizacion} · {c.cliente_nombre}</p><p className="text-xs text-slate-400">{c.cliente_telefono} · {c.tipo==='MULTIPLE'?'Múltiple':'Individual'} · {String(c.fecha||c.created_at||'').slice(0,10)}</p></div><div className="flex items-center gap-2"><span className="text-emerald-300 font-bold text-xs">{(c.opciones||[]).length} opción(es)</span><button onClick={()=>setCotizacionActiva(c)} className="bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-lg text-xs">Ver / Imprimir</button></div></div>)}{cotizaciones.length===0&&<p className="text-xs text-slate-500">Aún no hay cotizaciones guardadas.</p>}</div></div>
+          </div>
+        )}
+
         {tab === 'compras' && permisos.facturar && (
           <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
             <div className="flex justify-between items-center gap-3 flex-wrap">
@@ -1274,7 +1388,7 @@ function MainApp() {
                   <span className="font-mono text-[11px] text-amber-400">Código: {clienteSeleccionado.codigo_seguimiento}</span>
                 </div>
                 <p><strong className="text-white">Equipo:</strong> {clienteSeleccionado.tipo_equipo} {clienteSeleccionado.marca_modelo} (S/N: {clienteSeleccionado.serie || 'N/A'})</p>
-                <p className="text-slate-300"><strong>Accesorios:</strong> {clienteSeleccionado.deja_cargador ? '🔌 Cargador ' : ''} {clienteSeleccionado.deja_bateria ? `🔋 Batería (${clienteSeleccionado.serie_bateria || 'S/N'})` : ''} {!clienteSeleccionado.deja_cargador && !clienteSeleccionado.deja_bateria ? 'Ninguno' : ''}</p>
+                <p className="text-slate-300"><strong>Accesorios:</strong> {clienteSeleccionado.deja_cargador ? `🔌 Cargador (${clienteSeleccionado.serie_cargador || 'S/N no registrado'})` : 'Ninguno'}</p>
                 <p><strong className="text-white">Fallo Reportado:</strong> {clienteSeleccionado.fallo_reportado || clienteSeleccionado.falla_reportado}</p>
                 <p><strong className="text-white">Diagnóstico Técnico:</strong> {clienteSeleccionado.diagnostico || 'Equipo en proceso de revisión.'}</p>
                 
@@ -1414,6 +1528,16 @@ function MainApp() {
                             /> Remisiones, Ventas y Compras
                           </label>
                           <label className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={!!currentPerms.cancelar_remision}
+                              onChange={e => {
+                                const updated = { ...currentPerms, cancelar_remision: e.target.checked };
+                                setRoles(roles.map(rol => rol.id === r.id ? { ...rol, permisos: updated } : rol));
+                              }}
+                            /> Cancelar remisiones
+                          </label>
+                          <label className="flex items-center gap-2">
                             <input 
                               type="checkbox" 
                               checked={!!currentPerms.ver_configuracion} 
@@ -1438,9 +1562,10 @@ function MainApp() {
                   <label className="flex items-center gap-2"><input type="checkbox" checked={formNuevoRol.permisos.editar_diagnostico} onChange={e => setFormNuevoRol({ ...formNuevoRol, permisos: { ...formNuevoRol.permisos, editar_diagnostico: e.target.checked } })} /> Modificar Diagnóstico</label>
                   <label className="flex items-center gap-2"><input type="checkbox" checked={formNuevoRol.permisos.ver_clientes} onChange={e => setFormNuevoRol({ ...formNuevoRol, permisos: { ...formNuevoRol.permisos, ver_clientes: e.target.checked } })} /> Ver Clientes</label>
                   <label className="flex items-center gap-2"><input type="checkbox" checked={formNuevoRol.permisos.facturar} onChange={e => setFormNuevoRol({ ...formNuevoRol, permisos: { ...formNuevoRol.permisos, facturar: e.target.checked } })} /> Remisiones, Ventas y Compras</label>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={!!formNuevoRol.permisos.cancelar_remision} onChange={e => setFormNuevoRol({ ...formNuevoRol, permisos: { ...formNuevoRol.permisos, cancelar_remision: e.target.checked } })} /> Cancelar remisiones</label>
                   <label className="flex items-center gap-2"><input type="checkbox" checked={formNuevoRol.permisos.ver_configuracion} onChange={e => setFormNuevoRol({ ...formNuevoRol, permisos: { ...formNuevoRol.permisos, ver_configuracion: e.target.checked } })} /> Configuración</label>
                 </div>
-                <button onClick={async () => { if (!formNuevoRol.nombre) return alert('Ingresa un nombre para el rol.'); await agregarRol(formNuevoRol.nombre, formNuevoRol.permisos); alert('Rol creado con éxito'); setFormNuevoRol({ nombre: '', permisos: { crear_orden: true, editar_diagnostico: true, ver_clientes: true, editar_clientes: true, facturar: true, ver_configuracion: true } }); }} className="bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">Guardar Nuevo Rol</button>
+                <button onClick={async () => { if (!formNuevoRol.nombre) return alert('Ingresa un nombre para el rol.'); await agregarRol(formNuevoRol.nombre, formNuevoRol.permisos); alert('Rol creado con éxito'); setFormNuevoRol({ nombre: '', permisos: { crear_orden: true, editar_diagnostico: true, ver_clientes: true, editar_clientes: true, facturar: true, cancelar_remision: false, ver_configuracion: true } }); }} className="bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">Guardar Nuevo Rol</button>
 
                 <p className="font-bold text-indigo-400 uppercase pt-4 border-t border-slate-700">Crear Usuario y Asignar Rol</p>
                 <div className="grid grid-cols-2 gap-2"><input placeholder="Nombre Completo" className="bg-slate-800 border border-slate-700 p-2.5 rounded-xl text-white" value={formUsuarioNuevo.nombre} onChange={e => setFormUsuarioNuevo({ ...formUsuarioNuevo, nombre: e.target.value })} /><input placeholder="Usuario" className="bg-slate-800 border border-slate-700 p-2.5 rounded-xl text-white" value={formUsuarioNuevo.usuario} onChange={e => setFormUsuarioNuevo({ ...formUsuarioNuevo, usuario: e.target.value })} /></div>
@@ -1458,7 +1583,16 @@ function MainApp() {
       {modalEditOrden && (
         <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center p-4 z-50 no-imprimir">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-lg p-6 rounded-2xl space-y-3 max-h-[90vh] overflow-y-auto">
-            <h3 className="font-bold text-white text-base">Modificar Orden #{modalEditOrden.id}</h3>
+            <div className="space-y-1 border-b border-slate-700 pb-3">
+              <h3 className="font-bold text-white text-base">Modificar Orden {obtenerIdRegistroOrden(modalEditOrden)}</h3>
+              <p className="text-sm font-semibold text-indigo-300">Cliente: {modalEditOrden.cliente_nombre || 'Sin nombre registrado'}</p>
+              <p className="text-xs text-slate-300">Equipo: {modalEditOrden.tipo_equipo || 'Equipo'} {modalEditOrden.marca_modelo || 'Marca/modelo no registrado'}</p>
+            </div>
+
+            <div className="bg-amber-950/30 p-3 rounded-xl border border-amber-700/60 space-y-1">
+              <p className="text-xs font-bold text-amber-300">Fallo reportado al ingresar</p>
+              <p className="text-xs text-slate-100 whitespace-pre-wrap break-words">{modalEditOrden.fallo_reportado || modalEditOrden.falla_reportado || 'No se registró un fallo reportado para esta orden.'}</p>
+            </div>
             
             <div className="bg-slate-800/80 p-3 rounded-xl border border-slate-700 max-h-36 overflow-y-auto space-y-1 text-xs">
               <p className="font-bold text-indigo-400">Historial de Avances Anteriores:</p>
@@ -1475,6 +1609,7 @@ function MainApp() {
               <label className="text-[11px] text-slate-400 block mb-1">Estado del Equipo</label>
               <select className="w-full bg-slate-800 p-2 rounded-xl text-xs text-white" value={editOrdForm.estado} onChange={e => setEditOrdForm({ ...editOrdForm, estado: e.target.value })}>
                 <option value="Ingresado">Ingresado</option>
+                <option value="No tiene reparación">No tiene reparación</option>
                 <option value="En Diagnóstico">En Diagnóstico</option>
                 <option value="Esperando Repuesto">Esperando Repuesto</option>
                 <option value="Reparado / Listo">Reparado / Listo</option>
@@ -1578,7 +1713,7 @@ function MainApp() {
                   <div key={o.id} className="p-2.5 bg-slate-800 rounded-xl border border-slate-700 space-y-1">
                     <p className="font-bold text-white">Código: {o.codigo_seguimiento} | Estado: <span className="text-amber-400">{o.estado}</span></p>
                     <p className="text-slate-300">Equipo: {o.tipo_equipo} {o.marca_modelo} (S/N: {o.serie || 'N/A'})</p>
-                    <p className="text-slate-400">Accesorios: {o.deja_cargador ? '🔌 Cargador ' : ''} {o.deja_bateria ? `🔋 Batería (${o.serie_bateria || 'S/N'})` : ''}</p>
+                    <p className="text-slate-400">Accesorios: {o.deja_cargador ? `🔌 Cargador (${o.serie_cargador || 'S/N no registrado'})` : 'Ninguno'}</p>
                     <p className="text-slate-400">Fallo: {o.fallo_reportado || o.falla_reportado}</p>
                     <p className="text-slate-400">Diagnóstico: {o.diagnostico || 'En proceso'}</p>
                   </div>
@@ -1866,6 +2001,51 @@ function MainApp() {
         </div>
       )}
 
+      {modalCancelarRemision && (
+        <div className="fixed inset-0 bg-slate-950/85 flex items-center justify-center p-4 z-[70] no-imprimir">
+          <div className="bg-slate-900 border border-rose-800/70 w-full max-w-md p-6 rounded-2xl space-y-4 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <div className="bg-rose-950 text-rose-300 rounded-xl p-3 text-xl">⛔</div>
+              <div>
+                <h3 className="font-black text-white text-lg">Cancelar remisión {modalCancelarRemision.factura.numero_factura}</h3>
+                <p className="text-xs text-slate-400 mt-1">Cliente: {modalCancelarRemision.factura.cliente_nombre}</p>
+              </div>
+            </div>
+            <div className="bg-amber-950/40 border border-amber-700/60 p-3 rounded-xl text-xs text-amber-200">
+              La remisión no se eliminará. Quedará marcada como cancelada y se guardarán el usuario, la fecha y el motivo en su historial.
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-300 mb-1">Motivo de cancelación (obligatorio)</label>
+              <textarea
+                value={modalCancelarRemision.motivo}
+                onChange={e => setModalCancelarRemision({ ...modalCancelarRemision, motivo: e.target.value })}
+                placeholder="Ej. Precio incorrecto, datos equivocados, remisión duplicada..."
+                rows={3}
+                className="w-full bg-slate-800 border border-slate-700 focus:border-rose-500 p-3 rounded-xl text-sm text-white outline-none resize-y"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setModalCancelarRemision(null)} className="px-4 py-2 rounded-xl text-xs font-bold text-slate-300 hover:bg-slate-800">Volver</button>
+              <button
+                onClick={async () => {
+                  const motivo = String(modalCancelarRemision.motivo || '').trim();
+                  if (!motivo) return alert('Escribe el motivo de la cancelación.');
+                  const usuarioQueCancela = usuarioSesion?.nombre || 'Usuario';
+                  const resultado = await cancelarRemision(modalCancelarRemision.factura, motivo, usuarioQueCancela);
+                  if (resultado) {
+                    setModalCancelarRemision(null);
+                    if (facturaSeleccionada?.id === resultado.id) setFacturaSeleccionada(resultado);
+                    if (documentoImprimir?.data?.id === resultado.id) setDocumentoImprimir({ ...documentoImprimir, data: resultado });
+                    alert(`La remisión ${resultado.numero_factura} quedó cancelada y registrada en su historial.`);
+                  }
+                }}
+                className="bg-rose-700 hover:bg-rose-600 text-white px-4 py-2 rounded-xl text-xs font-black"
+              >Confirmar cancelación</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {facturaSeleccionada && (
         <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center p-4 z-50 no-imprimir">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-lg p-6 rounded-2xl space-y-4">
@@ -1877,6 +2057,17 @@ function MainApp() {
             <p className="text-xs text-slate-300"><strong>Teléfono:</strong> {facturaSeleccionada.cliente_telefono || 'N/A'}</p>
             <p className="text-xs text-slate-300"><strong>Vendedor:</strong> <span className="text-indigo-300 font-semibold">{facturaSeleccionada.usuario_creador || 'Sistema'}</span></p>
             <p className="text-xs text-slate-300"><strong>Tipo Operación:</strong> {facturaSeleccionada.tipo}</p>
+            {facturaEstaCancelada(facturaSeleccionada) && (() => {
+              const cancelacion = obtenerCancelacionFactura(facturaSeleccionada);
+              return (
+                <div className="bg-rose-950/50 border border-rose-700 rounded-xl p-3 space-y-1">
+                  <p className="text-rose-300 font-black text-sm">⛔ REMISIÓN CANCELADA</p>
+                  <p className="text-xs text-slate-200"><strong>Motivo:</strong> {cancelacion.motivo}</p>
+                  <p className="text-xs text-slate-400"><strong>Cancelada por:</strong> {cancelacion.usuario || 'Usuario'}</p>
+                  <p className="text-xs text-slate-400"><strong>Fecha y hora:</strong> {cancelacion.fecha ? new Date(cancelacion.fecha).toLocaleString('es-CO') : 'No registrada'}</p>
+                </div>
+              );
+            })()}
 
             <div className="border border-slate-800 rounded-xl overflow-hidden max-h-40 overflow-y-auto">
               <table className="w-full text-left text-xs text-slate-300">
@@ -1884,7 +2075,7 @@ function MainApp() {
                   <tr><th className="p-2">Ítem / Descripción</th><th className="p-2 text-center">Cant.</th><th className="p-2 text-right">Precio</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
-                  {(facturaSeleccionada.items || []).filter(it => !esRegistroGarantia(it)).map((it, idx) => (
+                  {(facturaSeleccionada.items || []).filter(it => !esRegistroGarantia(it) && (!it || it._tipo !== 'cancelacion')).map((it, idx) => (
                     <tr key={idx}>
                       <td className="p-2 text-[11px]">{it.descripcion}</td>
                       <td className="p-2 text-center text-[11px]">{it.cantidad}</td>
@@ -1911,7 +2102,9 @@ function MainApp() {
         <div className="fixed inset-0 bg-slate-950/90 flex items-center justify-center p-4 z-50">
           <div className="bg-white text-slate-900 w-full max-w-xl p-5 rounded-2xl space-y-2 shadow-2xl h-[50vh] max-h-[50vh] overflow-y-auto flex flex-col justify-between border-b-2 border-dashed border-slate-400">
             <div id="seccion-impresion" className="space-y-2 text-[17px]">
-              
+              {documentoImprimir.tipo === 'FACTURA' && facturaEstaCancelada(documentoImprimir.data) && (
+                <div className="border-4 border-rose-700 text-rose-700 text-center font-black text-xl p-2">DOCUMENTO CANCELADO — NO VÁLIDO PARA COBRO</div>
+              )}
               <div className="flex items-center justify-between border-b pb-1 gap-2">
                 <div className="flex items-center gap-2">
                   {empresa.logoUrl && (
@@ -1941,7 +2134,7 @@ function MainApp() {
                     <p><strong>Atendió:</strong> {documentoImprimir.data.usuario_creador || 'Sistema'}</p>
                   </div>
                   <p><strong>Equipo:</strong> {documentoImprimir.data.tipo_equipo} {documentoImprimir.data.marca_modelo} (S/N: {documentoImprimir.data.serie || 'N/A'})</p>
-                  <p><strong>Accesorios:</strong> {documentoImprimir.data.deja_cargador ? '🔌 Cargador ' : ''} {documentoImprimir.data.deja_bateria ? `🔋 Batería (${documentoImprimir.data.serie_bateria || 'S/N'})` : ''} {!documentoImprimir.data.deja_cargador && !documentoImprimir.data.deja_bateria ? 'Ninguno' : ''}</p>
+                  <p><strong>Accesorios:</strong> {documentoImprimir.data.deja_cargador ? `🔌 Cargador (${documentoImprimir.data.serie_cargador || 'S/N no registrado'})` : 'Ninguno'}</p>
                   <p><strong>Fallo Reportado:</strong> {documentoImprimir.data.fallo_reportado || documentoImprimir.data.falla_reportado}</p>
                   <p><strong>Diagnóstico Actual:</strong> {documentoImprimir.data.diagnostico || 'En proceso'}</p>
                   
@@ -1979,7 +2172,7 @@ function MainApp() {
                       <tr><th className="p-1.5 border">Descripción</th><th className="p-1.5 text-center border">Cant.</th><th className="p-1.5 text-right border">Precio</th></tr>
                     </thead>
                     <tbody>
-                      {(documentoImprimir.data.items || []).filter(it => !esRegistroGarantia(it)).map((it, idx) => (
+                      {(documentoImprimir.data.items || []).filter(it => !esRegistroGarantia(it) && (!it || it._tipo !== 'cancelacion')).map((it, idx) => (
                         <tr key={idx}><td className="p-1.5 border">{it.descripcion}</td><td className="p-1.5 text-center border">{it.cantidad}</td><td className="p-1.5 text-right border">$ {(it.precio || 0).toLocaleString('es-CO')}</td></tr>
                       ))}
                     </tbody>
@@ -2101,7 +2294,7 @@ function PortalPublico() {
               <span className="font-mono text-[11px] text-amber-400">Código: {ordenConsultaResult.codigo_seguimiento}</span>
             </div>
             <p className="text-white"><strong>Equipo:</strong> {ordenConsultaResult.tipo_equipo} {ordenConsultaResult.marca_modelo}</p>
-            <p className="text-slate-300"><strong>Accesorios:</strong> {ordenConsultaResult.deja_cargador ? '🔌 Cargador ' : ''} {ordenConsultaResult.deja_bateria ? `🔋 Batería (${ordenConsultaResult.serie_bateria || 'S/N'})` : ''} {!ordenConsultaResult.deja_cargador && !ordenConsultaResult.deja_bateria ? 'Ninguno' : ''}</p>
+            <p className="text-slate-300"><strong>Accesorios:</strong> {ordenConsultaResult.deja_cargador ? `🔌 Cargador (${ordenConsultaResult.serie_cargador || 'S/N no registrado'})` : 'Ninguno'}</p>
             <p className="text-white"><strong>Fallo Reportado:</strong> {ordenConsultaResult.fallo_reportado || ordenConsultaResult.falla_reportado}</p>
             <p className="text-white"><strong>Diagnóstico Técnico:</strong> {ordenConsultaResult.diagnostico || 'Equipo en proceso de revisión.'}</p>
             
